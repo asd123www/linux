@@ -2154,6 +2154,23 @@ static int kvm_vm_ioctl_get_dirty_log(struct kvm *kvm,
 }
 
 /**
+ * Zezhou: mimic the structure of kvm_vm_ioctl_get_dirty_log.
+ * 
+ */
+static int kvm_vm_ioctl_fmsync_get_dirty_log_huge(struct kvm *kvm,
+							 struct kvm_dirty_log *log)
+{
+	int r;
+
+	mutex_lock(&kvm->slots_lock);
+
+	r = kvm_get_dirty_log_protect(kvm, log);
+
+	mutex_unlock(&kvm->slots_lock);
+	return r;
+}
+
+/**
  * kvm_clear_dirty_log_protect - clear dirty bits in the bitmap
  *	and reenable dirty page tracking for the corresponding pages.
  * @kvm:	pointer to kvm instance
@@ -4558,6 +4575,19 @@ static long kvm_vm_ioctl(struct file *filp,
 		if (copy_from_user(&log, argp, sizeof(log)))
 			goto out;
 		r = kvm_vm_ioctl_get_dirty_log(kvm, &log);
+		break;
+	}
+	case KVM_FMSYNC_GET_DIRTY_LOG_HUGE: {
+		struct kvm_dirty_log log;
+
+		//print hello world.
+		printk("You successfully called KVM_FMSYNC_GET_DIRTY_LOG_HUGE!\n");
+		printk("Now simply replace KVM_GET_DIRTY_LOG with ours.");
+		r = -EFAULT;
+		// copy the struct kvm_dirty_log from userspace, I assume for safety.
+		if (copy_from_user(&log, argp, sizeof(log)))
+			goto out;
+		r = kvm_vm_ioctl_fmsync_get_dirty_log_huge(kvm, &log);
 		break;
 	}
 #ifdef CONFIG_KVM_GENERIC_DIRTYLOG_READ_PROTECT
