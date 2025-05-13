@@ -2059,6 +2059,8 @@ static int kvm_get_dirty_log_protect(struct kvm *kvm, struct kvm_dirty_log *log)
 	unsigned long *dirty_bitmap_buffer;
 	bool flush;
 
+	printk("[normal]: Inside linux/virt/kvm/kvm_main.c kvm_get_dirty_log_protect.\n");
+
 	/* Dirty ring tracking is exclusive to dirty log tracking */
 	if (kvm->dirty_ring_size)
 		return -ENXIO;
@@ -2121,6 +2123,50 @@ static int kvm_get_dirty_log_protect(struct kvm *kvm, struct kvm_dirty_log *log)
 }
 
 
+static int kvm_fmsync_get_dirty_log_huge_protect(struct kvm *kvm, struct kvm_dirty_log *log) {
+	struct kvm_memslots *slots;
+	struct kvm_memory_slot *memslot;
+	int as_id, id;
+	unsigned long n; // bytes for the bitmap.
+	// unsigned long *dirty_bitmap;
+
+	as_id = log->slot >> 16;
+	id = (u16)log->slot;
+	if (as_id >= KVM_ADDRESS_SPACE_NUM || id >= KVM_USER_MEM_SLOTS)
+		return -EINVAL;
+
+	slots = __kvm_memslots(kvm, as_id);
+	memslot = id_to_memslot(slots, id);
+	if (!memslot) return -ENOENT;
+
+	printk("[fmsync]: memslot size: %ld\n 4kb pages.\n", memslot->npages);
+	if (!memslot->fmsync_dirty_bitmap) {
+		if (memslot->npages % 512 != 0) {
+			printk("[fmsync]: memslot size(%ld) is not a multiple of 512 pages.\n", memslot->npages);
+			return -EINVAL;
+		}
+		n = ALIGN(memslot->npages / 512, BITS_PER_LONG) / 8;
+		printk("[fmsync]: allocate %ld bytes for fmsync_dirty_bitmap.\n", n);
+		memslot->fmsync_dirty_bitmap = (unsigned long *)kzalloc(n, GFP_KERNEL);
+	} else {
+		n = ALIGN(memslot->npages / 512, BITS_PER_LONG) / 8;
+	}
+
+	// pull the dirty info
+	KVM_MMU_LOCK(kvm);
+	kvm_arch_mmu_fmsync_dirty_log(kvm, memslot);
+	KVM_MMU_UNLOCK(kvm);
+
+	kvm_arch_flush_remote_tlbs_memslot(kvm, memslot);
+
+	printk("[fmsync]: log[%ld bytes] copy to user %ld bytes.\n", sizeof(log->dirty_bitmap), n);
+	if (copy_to_user(log->dirty_bitmap, memslot->fmsync_dirty_bitmap, n))
+		return -EFAULT;
+
+	return 0;
+}
+
+
 /**
  * kvm_vm_ioctl_get_dirty_log - get and clear the log of dirty pages in a slot
  * @kvm: kvm instance
@@ -2145,6 +2191,7 @@ static int kvm_vm_ioctl_get_dirty_log(struct kvm *kvm,
 {
 	int r;
 
+	printk("[normal]: Inside linux/virt/kvm/kvm_main.c kvm_vm_ioctl_get_dirty_log.\n");
 	mutex_lock(&kvm->slots_lock);
 
 	r = kvm_get_dirty_log_protect(kvm, log);
@@ -2162,9 +2209,10 @@ static int kvm_vm_ioctl_fmsync_get_dirty_log_huge(struct kvm *kvm,
 {
 	int r;
 
+	printk("[fmsync]: Inside linux/virt/kvm/kvm_main.c kvm_vm_ioctl_fmsync_get_dirty_log_huge.\n");
 	mutex_lock(&kvm->slots_lock);
 
-	r = kvm_get_dirty_log_protect(kvm, log);
+	r = kvm_fmsync_get_dirty_log_huge_protect(kvm, log);
 
 	mutex_unlock(&kvm->slots_lock);
 	return r;
@@ -4572,6 +4620,7 @@ static long kvm_vm_ioctl(struct file *filp,
 		struct kvm_dirty_log log;
 
 		r = -EFAULT;
+		printk("[normal]: KVM_GET_DIRTY_LOG!\n");
 		if (copy_from_user(&log, argp, sizeof(log)))
 			goto out;
 		r = kvm_vm_ioctl_get_dirty_log(kvm, &log);
@@ -4581,8 +4630,7 @@ static long kvm_vm_ioctl(struct file *filp,
 		struct kvm_dirty_log log;
 
 		//print hello world.
-		printk("You successfully called KVM_FMSYNC_GET_DIRTY_LOG_HUGE!\n");
-		printk("Now simply replace KVM_GET_DIRTY_LOG with ours.");
+		printk("[fmsync]: KVM_FMSYNC_GET_DIRTY_LOG_HUGE!\n");
 		r = -EFAULT;
 		// copy the struct kvm_dirty_log from userspace, I assume for safety.
 		if (copy_from_user(&log, argp, sizeof(log)))

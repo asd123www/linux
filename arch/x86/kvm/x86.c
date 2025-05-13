@@ -5958,6 +5958,7 @@ void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot)
 	 */
 	struct kvm_vcpu *vcpu;
 	unsigned long i;
+	printk("[fmsync]: kvm_arch_sync_dirty_log\n");
 
 	kvm_for_each_vcpu(i, vcpu, kvm)
 		kvm_vcpu_kick(vcpu);

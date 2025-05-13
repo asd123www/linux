@@ -1732,6 +1732,83 @@ void kvm_tdp_mmu_clear_dirty_pt_masked(struct kvm *kvm,
 }
 
 /*
+ * kvm_tdp_mmu_fmsync_dirty_log() – scan every huge-page SPTE that belongs to
+ *				 @slot, report/clear the dirty bit, and leave
+ *				 tracking enabled for the next pass.
+ *
+ * This is the “fast-mmu-sync” helper you stubbed out earlier.  It is roughly
+ * analogous to clear_dirty_gfn_range(), but it operates only on *leaf* TDP
+ * entries that map a 1 GiB or 2 MiB page.
+ *
+ * The function must be called with @kvm->mmu_lock *held for read*; the helper
+ * will RCU-protect its own walk.  A remote TLB flush is done lazily – the
+ * caller decides whether to issue one before releasing the lock.
+ *
+ * Returns true if at least one SPTE was modified, in which case a TLB flush
+ * is required before dropping mmu_lock.
+ */
+bool kvm_tdp_mmu_fmsync_dirty_log(struct kvm *kvm, const struct kvm_memory_slot *slot) {
+	struct kvm_mmu_page *root;
+	struct tdp_iter iter;
+	unsigned long flush_2MB = 0, flush_4KB = 0, flush_1GB = 0;
+	unsigned long idx = 0;
+	u64 new_spte;
+	bool flush_needed = false;
+
+	lockdep_assert_held_read(&kvm->mmu_lock);
+
+	// iterate over all the roots(top‑level page‑table page).
+	for_each_valid_tdp_mmu_root_yield_safe(kvm, root, slot->as_id, true) {
+		rcu_read_lock();
+
+		// a magic micro that only gives you leafs.
+		tdp_root_for_each_leaf_pte(iter, root, slot->base_gfn, slot->base_gfn + slot->npages) {
+retry:
+			/* Not present */
+			if (!is_shadow_present_pte(iter.old_spte))
+				continue;
+			/* Reschedule to avoid long-held mmu_lock, I don't know how useful this is */
+			if (tdp_mmu_iter_cond_resched(kvm, &iter,
+						      false, /* flush */ true))
+				continue;
+
+			if (iter.level == PG_LEVEL_4K) {
+				++flush_4KB;
+			} else if(iter.level == PG_LEVEL_1G) {
+				++flush_1GB;
+			} else if (iter.level == PG_LEVEL_2M) {
+				++flush_2MB;
+
+				// printf the warning message.
+				if (!spte_ad_enabled(iter.old_spte)){
+					printk("[fmsync]: Hardware AD bits not enabled\n");
+				}
+				if (!is_dirty_spte(iter.old_spte))
+					continue;
+
+				flush_needed = true;
+				idx = (iter.gfn - slot->base_gfn) / 512;
+				slot->fmsync_dirty_bitmap[idx / BITS_PER_LONG] |= (1UL << (idx % BITS_PER_LONG));
+
+				// clear the dirty bit
+				if (spte_ad_enabled(iter.old_spte)) {
+					new_spte = iter.old_spte & ~shadow_dirty_mask;
+				} else {
+					new_spte = iter.old_spte & ~PT_WRITABLE_MASK;
+				}
+				if (tdp_mmu_set_spte_atomic(kvm, &iter, new_spte))
+					goto retry;
+			}
+		}
+
+		rcu_read_unlock();
+	}
+	printk("[fmsync]: flush_4KB=%ld, flush_2MB=%ld, flush_1GB=%ld, total=%ld\n", flush_4KB, flush_2MB, flush_1GB, slot->npages);
+
+	return flush_needed;
+}
+
+/*
  * Clear leaf entries which could be replaced by large mappings, for
  * GFNs within the slot.
  */
