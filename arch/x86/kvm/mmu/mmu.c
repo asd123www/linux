@@ -1271,7 +1271,6 @@ static void kvm_mmu_write_protect_pt_masked(struct kvm *kvm,
 
 // fmsync dirty log, calls into tdp_mmu.
 void kvm_arch_mmu_fmsync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot) {
-	printk("[fmsync]: kvm_arch_mmu_fmsync_dirty_log.\n");
 	if (!is_tdp_mmu_enabled(kvm)) {
 		printk("[fmsync]: likely you are running as guest.");
 		return;

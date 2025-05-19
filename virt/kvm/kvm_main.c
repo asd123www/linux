@@ -2127,6 +2127,7 @@ static int kvm_fmsync_get_dirty_log_huge_protect(struct kvm *kvm, struct kvm_dir
 	int as_id, id;
 	unsigned long n; // bytes for the bitmap.
 	// unsigned long *dirty_bitmap;
+	unsigned long left_, right_;
 
 	as_id = log->slot >> 16;
 	id = (u16)log->slot;
@@ -2139,11 +2140,11 @@ static int kvm_fmsync_get_dirty_log_huge_protect(struct kvm *kvm, struct kvm_dir
 
 	printk("[fmsync]: memslot size: %ld 4kb pages.\n", memslot->npages);
 	if (!memslot->fmsync_dirty_bitmap) {
-		if (memslot->npages % 512 != 0) {
-			printk("[fmsync]: memslot size(%ld) is not a multiple of 512 pages.\n", memslot->npages);
-			return -EINVAL;
-		}
-		n = ALIGN(memslot->npages / 512, BITS_PER_LONG) / 8;
+		left_ = ALIGN_DOWN(memslot->base_gfn, (1 << (HPAGE_SHIFT - PAGE_SHIFT)));
+		right_ = ALIGN(memslot->base_gfn + memslot->npages, (1 << (HPAGE_SHIFT - PAGE_SHIFT)));
+		printk("[fmsync]: left: %lu right: %lu\n", left_, right_);
+		printk("[fmsync]: memslot->base_gfn: %llu, right_gfn=%llu\n", memslot->base_gfn, memslot->base_gfn + memslot->npages);
+		n = ALIGN((right_ - left_) / 512, BITS_PER_LONG) / 8;
 		printk("[fmsync]: allocate %ld bytes for fmsync_dirty_bitmap.\n", n);
 		memslot->fmsync_dirty_bitmap = (unsigned long *)kzalloc(n, GFP_KERNEL);
 	} else {
@@ -4626,6 +4627,7 @@ static long kvm_vm_ioctl(struct file *filp,
 		struct kvm_dirty_log log;
 
 		//print hello world.
+		printk("\n");
 		printk("[fmsync]: KVM_FMSYNC_GET_DIRTY_LOG_HUGE!\n");
 		r = -EFAULT;
 		// copy the struct kvm_dirty_log from userspace, I assume for safety.
