@@ -1751,6 +1751,7 @@ bool kvm_tdp_mmu_fmsync_dirty_log(struct kvm *kvm, const struct kvm_memory_slot 
 	struct kvm_mmu_page *root;
 	struct tdp_iter iter;
 	unsigned long flush_2MB = 0, flush_4KB = 0, flush_1GB = 0;
+	unsigned long dirty_count = 0;
 	unsigned long idx = 0;
 	u64 new_spte;
 	bool flush_needed = false;
@@ -1773,8 +1774,8 @@ retry:
 			if (!is_shadow_present_pte(iter.old_spte))
 				continue;
 			/* Reschedule to avoid long-held mmu_lock, I don't know how useful this is */
-			if (tdp_mmu_iter_cond_resched(kvm, &iter, false, true))
-				continue;
+			// if (tdp_mmu_iter_cond_resched(kvm, &iter, false, true))
+			// 	continue;
 
 			if (iter.level == PG_LEVEL_4K) {
 				++flush_4KB;
@@ -1791,6 +1792,7 @@ retry:
 			if (!is_dirty_spte(iter.old_spte))
 				continue;
 
+			++dirty_count;
 			flush_needed = true;
 			idx = (iter.gfn - left_) >> (HPAGE_SHIFT - PAGE_SHIFT);
 			slot->fmsync_dirty_bitmap[idx / BITS_PER_LONG] |= (1UL << (idx % BITS_PER_LONG));
@@ -1807,6 +1809,7 @@ retry:
 
 		rcu_read_unlock();
 	}
+	printk("[fmsync]: dirty_count=%ld\n", dirty_count);
 	printk("[fmsync]: flush_4KB=%ld, flush_2MB=%ld, flush_1GB=%ld, total=%ld\n", flush_4KB, flush_2MB, flush_1GB, slot->npages);
 
 	return flush_needed;
