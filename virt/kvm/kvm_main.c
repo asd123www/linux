@@ -2121,12 +2121,11 @@ static int kvm_get_dirty_log_protect(struct kvm *kvm, struct kvm_dirty_log *log)
 }
 
 
-static int kvm_fmsync_get_dirty_log_huge_protect(struct kvm *kvm, struct kvm_dirty_log *log) {
+static int kvm_fmsync_get_dirty_log(struct kvm *kvm, struct kvm_dirty_log *log, bool is_huge) {
 	struct kvm_memslots *slots;
 	struct kvm_memory_slot *memslot;
 	int as_id, id;
-	unsigned long n; // bytes for the bitmap.
-	// unsigned long *dirty_bitmap;
+	unsigned long n, n_base, n_huge; // bytes for the bitmap.
 	unsigned long left_, right_;
 
 	as_id = log->slot >> 16;
@@ -2143,10 +2142,12 @@ static int kvm_fmsync_get_dirty_log_huge_protect(struct kvm *kvm, struct kvm_dir
 	right_ = ALIGN(memslot->base_gfn + memslot->npages, (1 << (HPAGE_SHIFT - PAGE_SHIFT)));
 	// printk("[fmsync]: left: %lu right: %lu\n", left_, right_);
 	// printk("[fmsync]: memslot->base_gfn: %llu, right_gfn=%llu\n", memslot->base_gfn, memslot->base_gfn + memslot->npages);
-	n = ALIGN((right_ - left_) >> (HPAGE_SHIFT - PAGE_SHIFT), BITS_PER_LONG) / 8;
+	n_base = ALIGN(memslot->npages, BITS_PER_LONG) / 8;
+	n_huge = ALIGN((right_ - left_) >> (HPAGE_SHIFT - PAGE_SHIFT), BITS_PER_LONG) / 8;
+	n = is_huge? n_huge : n_base;
 	if (!memslot->fmsync_dirty_bitmap) {
 		// printk("[fmsync]: allocate %ld bytes for fmsync_dirty_bitmap.\n", n);
-		memslot->fmsync_dirty_bitmap = (unsigned long *)kzalloc(n, GFP_KERNEL);
+		memslot->fmsync_dirty_bitmap = (unsigned long *)kzalloc(n_base, GFP_KERNEL);
 	} else {
 		// printk("[fmsync]: clear %ld bytes for fmsync_dirty_bitmap.\n", n);
 		for (unsigned long i = 0; i < n / 8; ++i) {
@@ -2156,7 +2157,7 @@ static int kvm_fmsync_get_dirty_log_huge_protect(struct kvm *kvm, struct kvm_dir
 
 	// pull the dirty info
 	KVM_MMU_LOCK(kvm);
-	kvm_arch_mmu_fmsync_dirty_log(kvm, memslot);
+	kvm_arch_mmu_fmsync_dirty_log(kvm, memslot, is_huge);
 	KVM_MMU_UNLOCK(kvm);
 
 	kvm_arch_flush_remote_tlbs_memslot(kvm, memslot);
@@ -2205,14 +2206,15 @@ static int kvm_vm_ioctl_get_dirty_log(struct kvm *kvm,
  * Zezhou: mimic the structure of kvm_vm_ioctl_get_dirty_log.
  * 
  */
-static int kvm_vm_ioctl_fmsync_get_dirty_log_huge(struct kvm *kvm,
-							 struct kvm_dirty_log *log)
+static int kvm_vm_ioctl_fmsync_get_dirty_log(struct kvm *kvm,
+							 struct kvm_dirty_log *log,
+							 bool is_huge)
 {
 	int r;
 
 	mutex_lock(&kvm->slots_lock);
 
-	r = kvm_fmsync_get_dirty_log_huge_protect(kvm, log);
+	r = kvm_fmsync_get_dirty_log(kvm, log, is_huge);
 
 	mutex_unlock(&kvm->slots_lock);
 	return r;
@@ -4632,7 +4634,17 @@ static long kvm_vm_ioctl(struct file *filp,
 		// copy the struct kvm_dirty_log from userspace, I assume for safety.
 		if (copy_from_user(&log, argp, sizeof(log)))
 			goto out;
-		r = kvm_vm_ioctl_fmsync_get_dirty_log_huge(kvm, &log);
+		r = kvm_vm_ioctl_fmsync_get_dirty_log(kvm, &log, true);
+		break;
+	}
+	case KVM_FMSYNC_GET_DIRTY_LOG_BASE_WITH_SPLIT: {
+		struct kvm_dirty_log log;
+
+		r = -EFAULT;
+		// copy the struct kvm_dirty_log from userspace, I assume for safety.
+		if (copy_from_user(&log, argp, sizeof(log)))
+			goto out;
+		r = kvm_vm_ioctl_fmsync_get_dirty_log(kvm, &log, false);
 		break;
 	}
 #ifdef CONFIG_KVM_GENERIC_DIRTYLOG_READ_PROTECT

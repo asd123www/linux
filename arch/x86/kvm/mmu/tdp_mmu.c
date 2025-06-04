@@ -1747,7 +1747,7 @@ void kvm_tdp_mmu_clear_dirty_pt_masked(struct kvm *kvm,
  * Returns true if at least one SPTE was modified, in which case a TLB flush
  * is required before dropping mmu_lock.
  */
-bool kvm_tdp_mmu_fmsync_dirty_log(struct kvm *kvm, const struct kvm_memory_slot *slot) {
+bool kvm_tdp_mmu_fmsync_dirty_log(struct kvm *kvm, const struct kvm_memory_slot *slot, bool is_huge) {
 	struct kvm_mmu_page *root;
 	struct tdp_iter iter;
 	unsigned long flush_2MB = 0, flush_4KB = 0, flush_1GB = 0;
@@ -1761,21 +1761,17 @@ bool kvm_tdp_mmu_fmsync_dirty_log(struct kvm *kvm, const struct kvm_memory_slot 
 	left_ = ALIGN_DOWN(slot->base_gfn, (1 << (HPAGE_SHIFT - PAGE_SHIFT)));
 	right_ = ALIGN(slot->base_gfn + slot->npages, (1 << (HPAGE_SHIFT - PAGE_SHIFT)));
 
-	lockdep_assert_held_read(&kvm->mmu_lock);
+	lockdep_assert_held_write(&kvm->mmu_lock);
 
 	// iterate over all the roots(top‑level page‑table page).
-	for_each_valid_tdp_mmu_root_yield_safe(kvm, root, slot->as_id, true) {
+	for_each_valid_tdp_mmu_root_yield_safe(kvm, root, slot->as_id, false) {
 		rcu_read_lock();
 
 		// a magic micro that only gives you leafs.
 		tdp_root_for_each_leaf_pte(iter, root, left_, right_) {
 retry:
-			/* Not present */
 			if (!is_shadow_present_pte(iter.old_spte))
 				continue;
-			/* Reschedule to avoid long-held mmu_lock, I don't know how useful this is */
-			// if (tdp_mmu_iter_cond_resched(kvm, &iter, false, true))
-			// 	continue;
 
 			if (iter.level == PG_LEVEL_4K) {
 				++flush_4KB;
@@ -1794,8 +1790,31 @@ retry:
 
 			++dirty_count;
 			flush_needed = true;
-			idx = (iter.gfn - left_) >> (HPAGE_SHIFT - PAGE_SHIFT);
-			slot->fmsync_dirty_bitmap[idx / BITS_PER_LONG] |= (1UL << (idx % BITS_PER_LONG));
+
+			// if the page is huge, we need to set the bitmap.
+			if (is_huge) {
+				idx = (iter.gfn - left_) >> (HPAGE_SHIFT - PAGE_SHIFT);
+				slot->fmsync_dirty_bitmap[idx / BITS_PER_LONG] |= (1UL << (idx % BITS_PER_LONG));
+			} else {
+				if (iter.level == PG_LEVEL_4K) {
+					if (iter.gfn >= slot->base_gfn && iter.gfn < slot->base_gfn + slot->npages) {
+						// 4k page, so we need to set the bitmap.
+						idx = iter.gfn - slot->base_gfn;
+						slot->fmsync_dirty_bitmap[idx / BITS_PER_LONG] |= (1UL << (idx % BITS_PER_LONG));
+					}
+					// use bitmap_set
+				} else if (iter.level == PG_LEVEL_2M) {
+					for (gfn_t gfn = iter.gfn; gfn < iter.gfn + KVM_PAGES_PER_HPAGE(PG_LEVEL_2M); gfn++) {
+						if (gfn >= slot->base_gfn && gfn < slot->base_gfn + slot->npages) {
+							idx = gfn - slot->base_gfn;
+							slot->fmsync_dirty_bitmap[idx / BITS_PER_LONG] |= (1UL << (idx % BITS_PER_LONG));
+						}
+					}
+				} else {
+					printk("[fmsync]: unexpected level %d for GFN %llu\n", iter.level, iter.gfn);
+					continue;
+				}
+			}
 
 			// clear the dirty bit
 			if (spte_ad_enabled(iter.old_spte)) {
@@ -1805,11 +1824,30 @@ retry:
 			}
 			if (tdp_mmu_set_spte_atomic(kvm, &iter, new_spte))
 				goto retry;
+			
+			// split huge pages in migration critical path.
+			if (!is_huge && iter.level != PG_LEVEL_4K) {
+				struct kvm_mmu_page *child;
+
+				child = tdp_mmu_alloc_sp_for_split(kvm, &iter, false);
+				if (!child) {
+					printk("[fmsync]: failed to allocate child page for GFN %llu\n", iter.gfn);
+					continue;
+				}
+				if (child) {
+					int r = tdp_mmu_split_huge_page(kvm, &iter, child, false);
+					if (r) {
+						tdp_mmu_free_sp(child);
+					}
+					if (r)
+						goto retry;   /* now walk the children */
+				}
+			}
 		}
 
 		rcu_read_unlock();
 	}
-	printk("[fmsync]: dirty_count=%ld\n", dirty_count);
+	printk("[fmsync]: dirty_count=%ld, switchover=%d\n", dirty_count, is_huge);
 	printk("[fmsync]: flush_4KB=%ld, flush_2MB=%ld, flush_1GB=%ld, total=%ld\n", flush_4KB, flush_2MB, flush_1GB, slot->npages);
 
 	return flush_needed;

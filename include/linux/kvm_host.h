@@ -1382,7 +1382,7 @@ void kvm_arch_mmu_enable_log_dirty_pt_masked(struct kvm *kvm,
 					gfn_t gfn_offset,
 					unsigned long mask);
 void kvm_arch_sync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot);
-void kvm_arch_mmu_fmsync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot);
+void kvm_arch_mmu_fmsync_dirty_log(struct kvm *kvm, struct kvm_memory_slot *memslot, bool is_huge);
 
 #ifdef CONFIG_KVM_GENERIC_DIRTYLOG_READ_PROTECT
 void kvm_arch_flush_remote_tlbs_memslot(struct kvm *kvm,
